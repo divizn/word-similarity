@@ -17,7 +17,7 @@ fn main() {
     println!("Similarity between '{word1}' and '{word2}' is: {similarity}");
 }
 
-fn similarity(word1: &Vec<f32>, word2: &Vec<f32>) -> f32 {
+fn similarity(word1: &[f32], word2: &[f32]) -> f32 {
     let mut dot_product: f32 = 0.0;
     let mut norm_word1: f32 = 0.0;
     let mut norm_word2: f32 = 0.0;
@@ -28,8 +28,7 @@ fn similarity(word1: &Vec<f32>, word2: &Vec<f32>) -> f32 {
         norm_word2 += word2[i] * word2[i];
     }
 
-    let similarity = dot_product / (norm_word1.sqrt() * norm_word2.sqrt());
-    similarity
+    dot_product / (norm_word1.sqrt() * norm_word2.sqrt())
 }
 
 fn preprocessing(dataset: String) -> HashMap<String, Vec<f32>> {
@@ -53,16 +52,11 @@ fn preprocessing(dataset: String) -> HashMap<String, Vec<f32>> {
 
 fn init_hashmap() -> HashMap<String, Vec<f32>> {
     let default = String::from(DEFAULT_DATASET);
-    let map: HashMap<String, Vec<f32>>;
-
-    if !DEV {
+    if DEV {
+        preprocessing(default)
+    } else {
         let mut args: Args = std::env::args();
         let dataset = args.nth(1).unwrap();
-        map = preprocessing(dataset);
-    } else {
-        map = preprocessing(default);
+        preprocessing(dataset)
     }
-
-    map
 }
-// word math game https://medium.com/analytics-vidhya/basics-of-using-pre-trained-glove-vectors-in-python-d38905f356db
