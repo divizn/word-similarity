@@ -3,5 +3,5 @@
 version = 3
 
 [[package]]
-name = "contexti"
+name = "word-similarity"
 version = "0.1.0"

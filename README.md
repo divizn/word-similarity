@@ -5,3 +5,5 @@
 - create [word math game thing](https://medium.com/analytics-vidhya/basics-of-using-pre-trained-glove-vectors-in-python-d38905f356db)
 
 - clean up
+
+- store vector db using Redis

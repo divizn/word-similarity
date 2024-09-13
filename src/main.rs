@@ -4,15 +4,15 @@ use std::io::Read;
 use std::env::Args;
 
 const DEV: bool = true;
-const DEFAULT_DATASET: &str = "datasets/glove.twitter.27B/glove.twitter.27B.50d.txt";
+const DEFAULT_DATASET: &str = "datasets/glove.twitter.27B/glove.twitter.27B.200d.txt";
 
 fn main() {
     let embeddings_hashmap = init_hashmap();
 
-    let word1 = "merlin";
-    let word2 = "purple";
-    let word1_emb = embeddings_hashmap.get(word1).unwrap();
-    let word2_emb = embeddings_hashmap.get(word2).unwrap();
+    let word1 = "king";
+    let word2 = "queen";
+    let word1_emb = embeddings_hashmap.get(word1).expect("word not found in the dataset");
+    let word2_emb = embeddings_hashmap.get(word2).expect("word not found in the dataset");
     let similarity = similarity(word1_emb, word2_emb);
     println!("Similarity between '{word1}' and '{word2}' is: {similarity}");
 }
@@ -43,7 +43,7 @@ fn preprocessing(dataset: String) -> HashMap<String, Vec<f32>> {
     embedding_buffer.lines().for_each(|line| {
         let mut iter = line.split_whitespace();
         let word = iter.next().unwrap().to_string();
-        let embedding: Vec<f32> = iter.map(|x| x.parse().unwrap()).collect();
+        let embedding: Vec<f32> = iter.map(|x| x.parse().expect("invalid input")).collect();
         embeddings_hashmap.insert(word, embedding);
     });
 
