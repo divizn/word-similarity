@@ -3,6 +3,7 @@ name = "wordgebra"
 version = "0.1.0"
 edition = "2021"
 
+
 [lib]
 # The name of the native library. This is the name which will be used in Python to import the
 # library (i.e. `import wordgebra`). If you change this, you must also change the name of the
@@ -17,3 +18,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = "0.22.3"
+redis = "0.27.2"
+tokio = { version = "1.40.0", features = ["full"] }
