@@ -1,13 +1,13 @@
 [package]
-name = "word-similarity"
+name = "wordgebra"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
 # The name of the native library. This is the name which will be used in Python to import the
-# library (i.e. `import glove_Sim`). If you change this, you must also change the name of the
+# library (i.e. `import wordgebra`). If you change this, you must also change the name of the
 # `#[pymodule]` in `src/lib.rs`.
-name = "glove_sim"
+name = "wordgebra"
 # "cdylib" is necessary to produce a shared library for Python to import from.
 #
 # Downstream Rust code (including code in `bin/`, `examples/`, and `tests/`) will not be able
