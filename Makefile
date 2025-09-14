@@ -4,13 +4,13 @@ help: # Show help for each of the Makefile commands.
 	@grep -E '^[a-zA-Z0-9 -]+:.*#'  Makefile | sort | while read -r l; do printf "\033[1;32m$$(echo $$l | cut -f 1 -d':')\033[00m:$$(echo $$l | cut -f 2- -d'#')\n"; done
 
 up: # Start Redis container in the background
-	docker-compose up -d  # Launch Redis as background container
+	docker compose up -d  # Launch Redis as background container
 
 down: # Stop Redis container
-	docker-compose down  # Stop and remove Redis container
+	docker compose down  # Stop and remove Redis container
 
 logs: # Tail Redis container logs
-	docker-compose logs -f  # View Redis logs live
+	docker compose logs -f  # View Redis logs live
 
 redis-cli: # Open interactive Redis CLI
 	docker exec -it redis-embeddings redis-cli  # Connect to Redis CLI inside container
