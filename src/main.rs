@@ -157,6 +157,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Finished streaming embeddings.");
     }
 
+
+    println!("Server starting at :3000");
+    
     let app: axum::Router = Router::new().route("/similarity", post(similarity_handler));
 
     let listener = TcpListener::bind("localhost:3000").await.unwrap();
