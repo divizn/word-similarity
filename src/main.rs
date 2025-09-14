@@ -1,8 +1,10 @@
 use std::error::Error;
-use std::fs::File;
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
 use std::env::Args;
+
+use tokio::io::{self, AsyncBufReadExt, BufReader};
+use tokio::fs::File;
+use tokio::task;
 
 use redis::{Client};
 use once_cell::sync::Lazy;
@@ -14,14 +16,21 @@ static REDIS_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::open("redis://localhost:6379").expect("Failed to establish redis client")
 });
 
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>>{
+    let embeddings_handle = task::spawn(async {
+        init_hashmap().await
+    });
 
-fn main() -> Result<(), Box<dyn Error>>{
-    let embeddings_hashmap = init_hashmap();
 
-    let mut conn = REDIS_CLIENT.get_connection()?;
+    let mut conn = REDIS_CLIENT
+    .get_multiplexed_async_connection().await?;
 
-    let pong: String = redis::cmd("PING").query(&mut conn)?;
+    let pong: String = redis::cmd("PING").query_async(&mut conn).await?;
     println!("Redis response to ping: {}", pong);
+    
+    let embeddings_hashmap = embeddings_handle.await??;
+
 
     let word1 = "king";
     let word2 = "queen";
@@ -40,29 +49,31 @@ fn similarity(word1: &[f32], word2: &[f32]) -> f32 {
     dot_product / (norm1 * norm2)
 }
 
-fn preprocessing(dataset: String) -> HashMap<String, Vec<f32>> {
+async fn preprocessing(dataset: String) -> io::Result<HashMap<String, Vec<f32>>> {
     let mut embeddings_hashmap: HashMap<String, Vec<f32>> = HashMap::with_capacity(1_300_000);
 
-    let file = File::open(dataset).unwrap();
-    let embedding_buffer = BufReader::new(file);
+    let file = File::open(dataset).await?;
+    let reader = BufReader::new(file);
+    let mut lines = reader.lines();
 
-    embedding_buffer.lines().for_each(|line| {
-        let line = line.unwrap();
+    while let Some(line) = lines.next_line().await? {
         let mut iter = line.split_whitespace();
-        let word = iter.next().unwrap().to_string();
-        let embedding: Vec<f32> = iter.map(|x| x.parse().expect("invalid input")).collect();
-        embeddings_hashmap.insert(word, embedding);
-    });
+        if let Some(word) = iter.next() {
+            let embedding: Vec<f32> = iter.map(|x| x.parse().expect("invalid input")).collect();
+            embeddings_hashmap.insert(word.to_string(), embedding);
+        }
+    }
 
-    embeddings_hashmap
+    Ok(embeddings_hashmap)
 }
 
-fn init_hashmap() -> HashMap<String, Vec<f32>> {
-    if DEV {
-        preprocessing(String::from(DEFAULT_DATASET))
+async fn init_hashmap() -> io::Result<HashMap<String, Vec<f32>>> {
+    let dataset = if DEV {
+        String::from(DEFAULT_DATASET)
     } else {
         let mut args: Args = std::env::args();
-        let dataset = args.nth(1).unwrap();
-        preprocessing(dataset)
-    }
+        args.nth(1).expect("No dataset argument provided")
+    };
+
+    preprocessing(dataset).await
 }
