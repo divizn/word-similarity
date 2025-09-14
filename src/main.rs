@@ -4,7 +4,7 @@ use std::io::Read;
 use std::env::Args;
 
 const DEV: bool = true;
-const DEFAULT_DATASET: &str = "datasets/glove.twitter.27B/glove.twitter.27B.200d.txt";
+const DEFAULT_DATASET: &str = "embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt";
 
 fn main() {
     let embeddings_hashmap = init_hashmap();
