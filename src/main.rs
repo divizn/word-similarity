@@ -18,6 +18,12 @@ struct Token {
     embedding: Embedding, // e.g. see Embedding
 }
 
+struct Word {
+    val: String, // word value e.g. king
+    vector: Option<Vec<f32>> // vector representation
+
+}
+
 /// Represents the dataset, and wraps with Embedding so can provide context to Redis.
 struct Dataset {
     dir: String, // e.g. embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt
@@ -67,11 +73,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Embeddings already in Redis, skipping streaming.");
     }
 
-    let king: Vec<f32> = fetch_embedding(&mut conn, Token{word:String::from("king"), embedding:Embedding::GLOVE}).await?;
-    let queen: Vec<f32> = fetch_embedding(&mut conn, Token{word:String::from("queen"), embedding:Embedding::GLOVE}).await?;
+    let mut word1 = Word{val: String::from("dog"), vector: None};
+    let mut word2 = Word{val: String::from("cat"), vector: None};
 
-    let similarity = cosine_similarity(&king, &queen);
-    println!("Similarity between 'king' and 'queen': {}", similarity);
+    word1.vector = Some(fetch_embedding(&mut conn, Token{word:word1.val.clone(), embedding:Embedding::GLOVE}).await?);
+    word2.vector = Some(fetch_embedding(&mut conn, Token{word:word2.val.clone(), embedding:Embedding::GLOVE}).await?);
+
+    let similarity = cosine_similarity(&word1.vector.unwrap(), &word2.vector.expect("vector not found for vector"));
+    println!("Similarity between '{}' and '{}': {similarity}", word1.val, word2.val);
 
     Ok(())
 }
