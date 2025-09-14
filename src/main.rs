@@ -2,13 +2,13 @@ use log::info;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::fs::File;
 use redis::{AsyncCommands, Client};
-use once_cell::sync::Lazy;
 use std::error::Error;
+use std::sync::LazyLock;
 
 const DEV: bool = true;
 const BATCH_SIZE: usize = 500; // Number of embeddings per pipeline batch for Redis HSET
 
-static REDIS_CLIENT: Lazy<Client> = Lazy::new(|| {
+static REDIS_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::open("redis://localhost:6379").expect("Failed to establish redis client")
 });
 
@@ -32,27 +32,27 @@ struct Dataset {
 
 /// The different types of embeddings stored in Redis.
 enum Embedding {
-    GLOVE,
-    WORD2VEC,
+    Glove,
+    Word2vec,
 }
 
 impl Embedding {
     /// Gets the Embedding from the directory path.
     fn from_path(path: &str) -> Option<Self> {
         if path.to_uppercase().contains("GLOVE") {
-            Some(Embedding::GLOVE)
+            Some(Embedding::Glove)
         } else if path.to_uppercase().contains("WORD2VEC") {
-            Some(Embedding::WORD2VEC)
+            Some(Embedding::Word2vec)
         } else {
             None
         }
     }
 
-    /// as_str implementation to get embedding from Embedding.
+    /// `as_str` implementation to get embedding from Embedding.
     fn as_str(&self) -> &str {
         match self {
-            Embedding::GLOVE => "GLOVE",
-            Embedding::WORD2VEC => "WORD2VEC",
+            Embedding::Glove => "GLOVE",
+            Embedding::Word2vec => "WORD2VEC",
         }
     }
 }
@@ -65,19 +65,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut conn = REDIS_CLIENT.get_multiplexed_async_connection().await?;
 
     let db_ready: bool = conn.exists("GLOVE:OK").await?;
-    if !db_ready {
+    if db_ready {
+        info!("Embeddings already in Redis, skipping streaming.");
+    } else {
         info!("Streaming embeddings into Redis...");
         init_db(&mut conn).await?;
         info!("Finished streaming embeddings.");
-    } else {
-        info!("Embeddings already in Redis, skipping streaming.");
     }
 
     let mut word1 = Word{val: String::from("dog"), vector: None};
     let mut word2 = Word{val: String::from("cat"), vector: None};
 
-    word1.vector = Some(fetch_embedding(&mut conn, Token{word:word1.val.clone(), embedding:Embedding::GLOVE}).await?);
-    word2.vector = Some(fetch_embedding(&mut conn, Token{word:word2.val.clone(), embedding:Embedding::GLOVE}).await?);
+    word1.vector = Some(fetch_embedding(&mut conn, Token{word:word1.val.clone(), embedding:Embedding::Glove}).await?);
+    word2.vector = Some(fetch_embedding(&mut conn, Token{word:word2.val.clone(), embedding:Embedding::Glove}).await?);
 
     let similarity = cosine_similarity(&word1.vector.unwrap(), &word2.vector.expect("vector not found for vector"));
     println!("Similarity between '{}' and '{}': {similarity}", word1.val, word2.val);
@@ -152,7 +152,7 @@ async fn load_db(
                 let _: () = pipe.query_async(conn).await.unwrap();
                 pipe = redis::pipe(); // reset pipeline
                 batch_count = 0;
-                info!("Added {} embeddings to Redis (total {})", BATCH_SIZE, total_count);
+                info!("Added {batch_count} embeddings to Redis (total {total_count})");
             }
         }
     }
