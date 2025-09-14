@@ -62,7 +62,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if !db_ready {
         info!("Streaming embeddings into Redis...");
         init_db(&mut conn).await?;
-        let _: () = conn.set("GLOVE:OK", "1").await?;
         info!("Finished streaming embeddings.");
     } else {
         info!("Embeddings already in Redis, skipping streaming.");
@@ -99,7 +98,7 @@ fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> f32 {
 }
 
 /// Sets up Redis to store vectors provided by the `Dataset`. The key is represented like `Embedding:word` where `dataset.Embedding` is the embedding, and word is the word from the dataset.
-async fn preprocessing(
+async fn load_db(
     dataset: Dataset,
     conn: &mut redis::aio::MultiplexedConnection,
 ) -> io::Result<()> {
@@ -154,8 +153,16 @@ async fn preprocessing(
         let _: () = pipe.query_async(conn).await.unwrap();
         info!("Added final {batch_count} embeddings to Redis (total {total_count})");
     }
+    
+    let ok_key = format!("{}:OK", dataset.embedding.as_str());
+    let _: () = redis::cmd("SET")
+        .arg(&ok_key)
+        .arg("1")
+        .query_async(conn)
+        .await
+        .unwrap();
 
-    info!("Finished streaming embeddings to Redis");
+    info!("Finished streaming embeddings to Redis {ok_key}");
 
     Ok(())
 }
@@ -175,5 +182,5 @@ async fn init_db(conn: &mut redis::aio::MultiplexedConnection) -> io::Result<()>
         }
     };
 
-    preprocessing(dataset, conn).await
+    load_db(dataset, conn).await
 }
