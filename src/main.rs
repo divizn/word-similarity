@@ -1,79 +1,179 @@
-use std::error::Error;
-use std::collections::HashMap;
-use std::env::Args;
-
+use log::info;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::fs::File;
-use tokio::task;
-
-use redis::{Client};
+use redis::{AsyncCommands, Client};
 use once_cell::sync::Lazy;
+use std::error::Error;
 
 const DEV: bool = true;
-const DEFAULT_DATASET: &str = "embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt";
+const BATCH_SIZE: usize = 500; // Number of embeddings per pipeline batch for Redis HSET
 
 static REDIS_CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::open("redis://localhost:6379").expect("Failed to establish redis client")
 });
 
+/// Represents the input word. Wraps the input word with Embedding  so it can be retreived from Redis.
+struct Token {
+    word: String, // e.g. king
+    embedding: Embedding, // e.g. see Embedding
+}
+
+/// Represents the dataset, and wraps with Embedding so can provide context to Redis.
+struct Dataset {
+    dir: String, // e.g. embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt
+    embedding: Embedding // see Embedding
+}
+
+/// The different types of embeddings stored in Redis.
+enum Embedding {
+    GLOVE,
+    WORD2VEC,
+}
+
+impl Embedding {
+    /// Gets the Embedding from the directory path.
+    fn from_path(path: &str) -> Option<Self> {
+        if path.to_uppercase().contains("GLOVE") {
+            Some(Embedding::GLOVE)
+        } else if path.to_uppercase().contains("WORD2VEC") {
+            Some(Embedding::WORD2VEC)
+        } else {
+            None
+        }
+    }
+
+    /// as_str implementation to get embedding from Embedding.
+    fn as_str(&self) -> &str {
+        match self {
+            Embedding::GLOVE => "GLOVE",
+            Embedding::WORD2VEC => "WORD2VEC",
+        }
+    }
+}
+
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>>{
-    let embeddings_handle = task::spawn(async {
-        init_hashmap().await
-    });
+async fn main() -> Result<(), Box<dyn Error>> {
+    env_logger::init();
+    info!("Logger initialised");
 
+    let mut conn = REDIS_CLIENT.get_multiplexed_async_connection().await?;
 
-    let mut conn = REDIS_CLIENT
-    .get_multiplexed_async_connection().await?;
+    let db_ready: bool = conn.exists("GLOVE:OK").await?;
+    if !db_ready {
+        info!("Streaming embeddings into Redis...");
+        init_db(&mut conn).await?;
+        let _: () = conn.set("GLOVE:OK", "1").await?;
+        info!("Finished streaming embeddings.");
+    } else {
+        info!("Embeddings already in Redis, skipping streaming.");
+    }
 
-    let pong: String = redis::cmd("PING").query_async(&mut conn).await?;
-    println!("Redis response to ping: {}", pong);
-    
-    let embeddings_hashmap = embeddings_handle.await??;
+    let king: Vec<f32> = fetch_embedding(&mut conn, Token{word:String::from("king"), embedding:Embedding::GLOVE}).await?;
+    let queen: Vec<f32> = fetch_embedding(&mut conn, Token{word:String::from("queen"), embedding:Embedding::GLOVE}).await?;
 
-
-    let word1 = "king";
-    let word2 = "queen";
-    let word1_emb = embeddings_hashmap.get(word1).expect("word not found in the dataset");
-    let word2_emb = embeddings_hashmap.get(word2).expect("word not found in the dataset");
-    let similarity = similarity(word1_emb, word2_emb);
-    println!("Similarity between '{word1}' and '{word2}' is: {similarity}");
+    let similarity = cosine_similarity(&king, &queen);
+    println!("Similarity between 'king' and 'queen': {}", similarity);
 
     Ok(())
 }
 
-fn similarity(word1: &[f32], word2: &[f32]) -> f32 {
-    let dot_product: f32 = word1.iter().zip(word2).map(|(a, b)| a * b).sum();
-    let norm1: f32 = word1.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm2: f32 = word2.iter().map(|x| x * x).sum::<f32>().sqrt();
-    dot_product / (norm1 * norm2)
+/// Takes Multiplexed Redis connection and Token and fetches the vector from Redis provided by `Token.word`.
+async fn fetch_embedding(
+    conn: &mut redis::aio::MultiplexedConnection,
+    token: Token,
+) -> redis::RedisResult<Vec<f32>> {
+    let redis_key = format!("{}:{}", token.embedding.as_str(), token.word);
+    let result: Vec<String> = conn.hvals(redis_key).await?;
+    Ok(result
+        .into_iter()
+        .map(|v| v.parse::<f32>().unwrap())
+        .collect())
 }
 
-async fn preprocessing(dataset: String) -> io::Result<HashMap<String, Vec<f32>>> {
-    let mut embeddings_hashmap: HashMap<String, Vec<f32>> = HashMap::with_capacity(1_300_000);
+/// Calculates the cosine simuilarity between 2 vectors `vec1` and `vec2`.
+fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> f32 {
+    let dot: f32 = vec1.iter().zip(vec2).map(|(a, b)| a * b).sum();
+    let norm1: f32 = vec1.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm2: f32 = vec2.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot / (norm1 * norm2)
+}
 
-    let file = File::open(dataset).await?;
+/// Sets up Redis to store vectors provided by the `Dataset`. The key is represented like `Embedding:word` where `dataset.Embedding` is the embedding, and word is the word from the dataset.
+async fn preprocessing(
+    dataset: Dataset,
+    conn: &mut redis::aio::MultiplexedConnection,
+) -> io::Result<()> {
+    let file = File::open(&dataset.dir).await?;
+    info!("opened file {}", &dataset.dir);
     let reader = BufReader::new(file);
+    info!("reading lines from file");
     let mut lines = reader.lines();
+
+    let mut pipe = redis::pipe();
+    let mut batch_count = 0;
+    let mut total_count = 0;
+
+    info!("starting redis storage");
 
     while let Some(line) = lines.next_line().await? {
         let mut iter = line.split_whitespace();
         if let Some(word) = iter.next() {
-            let embedding: Vec<f32> = iter.map(|x| x.parse().expect("invalid input")).collect();
-            embeddings_hashmap.insert(word.to_string(), embedding);
+            let embedding: Vec<f32> = iter.map(|x| x.parse().unwrap()).collect();
+            let redis_key = format!("{}:{}", dataset.embedding.as_str(), word);
+            info!("word: {word}");
+            info!("embedding (first only): {:?}", embedding[0]);
+            info!("created redis key for {word}: {redis_key}");
+
+            info!("piping HSETs");
+            pipe.cmd("HSET")
+                .arg(&redis_key)
+                .arg(
+                    embedding
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(i, val)| vec![i.to_string(), val.to_string()])
+                        .collect::<Vec<String>>(),
+                );
+            
+            batch_count += 1;
+            total_count += 1;
+            info!("current batch size: {batch_count}");
+            info!("total batch size: {total_count}");
+
+            if batch_count >= BATCH_SIZE {
+                let _: () = pipe.query_async(conn).await.unwrap();
+                pipe = redis::pipe(); // reset pipeline
+                batch_count = 0;
+                info!("Added {} embeddings to Redis (total {})", BATCH_SIZE, total_count);
+            }
         }
     }
 
-    Ok(embeddings_hashmap)
+    // Flush remaining commands
+    if batch_count > 0 {
+        let _: () = pipe.query_async(conn).await.unwrap();
+        info!("Added final {batch_count} embeddings to Redis (total {total_count})");
+    }
+
+    info!("Finished streaming embeddings to Redis");
+
+    Ok(())
 }
 
-async fn init_hashmap() -> io::Result<HashMap<String, Vec<f32>>> {
+/// Retrieves dataset from stdin, else fallbacks to default directory (glove.twitter.27B).
+async fn init_db(conn: &mut redis::aio::MultiplexedConnection) -> io::Result<()> {
     let dataset = if DEV {
-        String::from(DEFAULT_DATASET)
+        Dataset{
+            dir: String::from("embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt"),
+            embedding: Embedding::from_path("embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt").expect("Unknown embedding type")
+        }
     } else {
-        let mut args: Args = std::env::args();
-        args.nth(1).expect("No dataset argument provided")
+        let arg = std::env::args().nth(1).expect("No dataset argument provided");
+        Dataset{
+            dir: String::from(&arg),
+            embedding: Embedding::from_path(arg.as_str()).expect("Unknown embedding type")
+        }
     };
 
-    preprocessing(dataset).await
+    preprocessing(dataset, conn).await
 }
