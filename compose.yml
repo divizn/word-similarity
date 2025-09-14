@@ -1,0 +1,12 @@
+services:
+  redis:
+    image: redis
+    container_name: redis-embeddings
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
