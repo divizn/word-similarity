@@ -1,13 +1,27 @@
+use std::error::Error;
 use std::fs::File;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::env::Args;
 
+use redis::{Client};
+use once_cell::sync::Lazy;
+
 const DEV: bool = true;
 const DEFAULT_DATASET: &str = "embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt";
 
-fn main() {
+static REDIS_CLIENT: Lazy<Client> = Lazy::new(|| {
+    Client::open("redis://localhost:6379").expect("Failed to establish redis client")
+});
+
+
+fn main() -> Result<(), Box<dyn Error>>{
     let embeddings_hashmap = init_hashmap();
+
+    let mut conn = REDIS_CLIENT.get_connection()?;
+
+    let pong: String = redis::cmd("PING").query(&mut conn)?;
+    println!("Redis response to ping: {}", pong);
 
     let word1 = "king";
     let word2 = "queen";
@@ -15,6 +29,8 @@ fn main() {
     let word2_emb = embeddings_hashmap.get(word2).expect("word not found in the dataset");
     let similarity = similarity(word1_emb, word2_emb);
     println!("Similarity between '{word1}' and '{word2}' is: {similarity}");
+
+    Ok(())
 }
 
 fn similarity(word1: &[f32], word2: &[f32]) -> f32 {
