@@ -1,9 +1,14 @@
+use axum::routing::post;
+use axum::{Json, Router};
 use log::info;
+use redis::aio::MultiplexedConnection;
+use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::fs::File;
 use redis::{AsyncCommands, Client};
+use tokio::net::TcpListener;
 use std::error::Error;
-use std::sync::LazyLock;
+use std::sync::{LazyLock};
 
 const DEV: bool = true;
 const BATCH_SIZE: usize = 500; // Number of embeddings per pipeline batch for Redis HSET
@@ -12,12 +17,15 @@ static REDIS_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::open("redis://localhost:6379").expect("Failed to establish redis client")
 });
 
+
 /// Represents the input word. Wraps the input word with Embedding  so it can be retreived from Redis.
 struct Token {
     word: String, // e.g. king
     embedding: Embedding, // e.g. see Embedding
 }
 
+/// Represents a word, stores word value and the vector representation - different from Token which is used for loading words into database
+#[derive(Serialize, Deserialize)]
 struct Word {
     val: String, // word value e.g. king
     vector: Option<Vec<f32>> // vector representation
@@ -28,9 +36,55 @@ struct Word {
 struct Dataset {
     dir: String, // e.g. embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt
     embedding: Embedding // see Embedding
+
+
+}
+
+
+/// ### API Request body
+/// - `word1` - First word to compare
+/// - `word2` - Second word to compare
+/// - `embedding` - The vector embedding to use e.g. `GLOVE` or `WORD2VEC`. Defaults to `GLOVE`
+#[derive(Deserialize)]
+struct SimilarityRequest {
+    word1: Word,
+    word2: Word,
+
+    #[serde(default = "default_embedding")]
+    embedding: Embedding, // "Glove" or "Word2vec   "
+
+    #[serde(default = "default_measure")]
+    measure: Measure
+}
+
+/// Returns the default `Embedding`
+fn default_embedding() -> Embedding {
+    Embedding::Glove
+}
+
+// Returns the default `Measure`.
+fn default_measure() -> Measure {
+    Measure::Cosine
+}
+
+/// ### API Response body
+/// - `similarity` - returns the similarity of the 2 words.
+/// - `measure` - returns the `measure` used e.g. cosine similarity
+#[derive(Serialize)]
+struct SimilarityResponse {
+    words: [Word; 2],
+    similarity: f32,
+}
+
+/// Measures used to estimate similarity between words.
+#[derive(Serialize, Deserialize)]
+enum Measure {
+    Cosine,
+    Dot
 }
 
 /// The different types of embeddings stored in Redis.
+#[derive(Deserialize, Clone, Copy)]
 enum Embedding {
     Glove,
     Word2vec,
@@ -47,14 +101,44 @@ impl Embedding {
             None
         }
     }
-
-    /// `as_str` implementation to get embedding from Embedding.
+    /// `as_str` implementation to get embedding str from Embedding.
     fn as_str(&self) -> &str {
         match self {
             Embedding::Glove => "GLOVE",
             Embedding::Word2vec => "WORD2VEC",
         }
     }
+}
+
+async fn similarity_handler(
+    Json(payload): Json<SimilarityRequest>,
+) -> Json<SimilarityResponse> {
+    // Fetch embeddings from Redis
+    let token1 = Token {
+        word: payload.word1.val.clone(),
+        embedding: payload.embedding,
+    };
+
+    let token2 = Token {
+        word: payload.word2.val.clone(),
+        embedding: payload.embedding,
+    };
+
+    let mut conn1 = REDIS_CLIENT.get_multiplexed_async_connection().await.expect("could not get multiplexed connection");
+    let mut conn2: MultiplexedConnection = REDIS_CLIENT.get_multiplexed_async_connection().await.expect("could not get multiplexed connection");
+
+    let vec1 = fetch_embedding(&mut conn1, token1).await.unwrap();
+    let vec2 = fetch_embedding(&mut conn2, token2).await.unwrap();
+
+    let mut word1 = payload.word1;
+    let mut word2 = payload.word2;
+    word1.vector = Some(vec1);
+    word2.vector = Some(vec2);
+
+    let sim = calculate_similarity(&word1.vector.clone().unwrap(), &word2.vector.clone().unwrap(), payload.measure);
+
+
+    Json(SimilarityResponse { similarity: sim, words: [word1, word2] })
 }
 
 #[tokio::main]
@@ -73,14 +157,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Finished streaming embeddings.");
     }
 
-    let mut word1 = Word{val: String::from("dog"), vector: None};
-    let mut word2 = Word{val: String::from("cat"), vector: None};
+    let app: axum::Router = Router::new().route("/similarity", post(similarity_handler));
 
-    word1.vector = Some(fetch_embedding(&mut conn, Token{word:word1.val.clone(), embedding:Embedding::Glove}).await?);
-    word2.vector = Some(fetch_embedding(&mut conn, Token{word:word2.val.clone(), embedding:Embedding::Glove}).await?);
+    let listener = TcpListener::bind("localhost:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();  
 
-    let similarity = cosine_similarity(&word1.vector.unwrap(), &word2.vector.expect("vector not found for vector"));
-    println!("Similarity between '{}' and '{}': {similarity}", word1.val, word2.val);
+    
+    // let mut word1 = Word{val: String::from("dog"), vector: None};
+    // let mut word2 = Word{val: String::from("cat"), vector: None};
+
+    // word1.vector = Some(fetch_embedding(&mut conn, Token{word:word1.val.clone(), embedding:Embedding::Glove}).await?);
+    // word2.vector = Some(fetch_embedding(&mut conn, Token{word:word2.val.clone(), embedding:Embedding::Glove}).await?);
+
+    // let similarity = cosine_similarity(&word1.vector.unwrap(), &word2.vector.expect("vector not found for vector"));
+    // println!("Similarity between '{}' and '{}': {similarity}", word1.val, word2.val);
 
     Ok(())
 }
@@ -98,13 +188,29 @@ async fn fetch_embedding(
         .collect())
 }
 
+// calculates the dot product between 2 vectors `vec1` and `vec2`
+fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
+    assert_eq!(vec1.len(), vec2.len(), "Vectors must have the same length");
+    vec1.iter().zip(vec2).map(|(a, b)| a * b).sum()
+}
+
+
 /// Calculates the cosine simuilarity between 2 vectors `vec1` and `vec2`.
 fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> f32 {
-    let dot: f32 = vec1.iter().zip(vec2).map(|(a, b)| a * b).sum();
+    let dot = dot_product(vec1, vec2);
     let norm1: f32 = vec1.iter().map(|x| x * x).sum::<f32>().sqrt();
     let norm2: f32 = vec2.iter().map(|x| x * x).sum::<f32>().sqrt();
     dot / (norm1 * norm2)
 }
+
+
+fn calculate_similarity(vec1: &[f32], vec2: &[f32], measure: Measure) -> f32 {
+    match measure {
+        Measure::Cosine => cosine_similarity(vec1, vec2),
+        Measure::Dot => dot_product(vec1, vec2)
+    }
+}
+
 
 /// Sets up Redis to store vectors provided by the `Dataset`. The key is represented like `Embedding:word` where `dataset.Embedding` is the embedding, and word is the word from the dataset.
 async fn load_db(
