@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::collections::HashMap;
-use std::io::Read;
+use std::io::{BufRead, BufReader};
 use std::env::Args;
 
 const DEV: bool = true;
@@ -18,29 +18,20 @@ fn main() {
 }
 
 fn similarity(word1: &[f32], word2: &[f32]) -> f32 {
-    let mut dot_product: f32 = 0.0;
-    let mut norm_word1: f32 = 0.0;
-    let mut norm_word2: f32 = 0.0;
-
-    for i in 0..word1.len() {
-        dot_product += word1[i] * word2[i];
-        norm_word1 += word1[i] * word1[i];
-        norm_word2 += word2[i] * word2[i];
-    }
-
-    dot_product / (norm_word1.sqrt() * norm_word2.sqrt())
+    let dot_product: f32 = word1.iter().zip(word2).map(|(a, b)| a * b).sum();
+    let norm1: f32 = word1.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm2: f32 = word2.iter().map(|x| x * x).sum::<f32>().sqrt();
+    dot_product / (norm1 * norm2)
 }
 
 fn preprocessing(dataset: String) -> HashMap<String, Vec<f32>> {
-    let mut embeddings_hashmap: HashMap<String, Vec<f32>> = HashMap::new();
+    let mut embeddings_hashmap: HashMap<String, Vec<f32>> = HashMap::with_capacity(1_300_000);
 
-    let mut reader = File::open(dataset).unwrap();
-    let mut embedding_buffer: String = String::new();
-    match reader.read_to_string(&mut embedding_buffer) {
-        Ok(bytes) => println!("Read {bytes} bytes ({mb}MB)", mb = bytes / 1024 / 1024),
-        Err(e) => {println!("{e}")},
-    }
+    let file = File::open(dataset).unwrap();
+    let embedding_buffer = BufReader::new(file);
+
     embedding_buffer.lines().for_each(|line| {
+        let line = line.unwrap();
         let mut iter = line.split_whitespace();
         let word = iter.next().unwrap().to_string();
         let embedding: Vec<f32> = iter.map(|x| x.parse().expect("invalid input")).collect();
@@ -51,9 +42,8 @@ fn preprocessing(dataset: String) -> HashMap<String, Vec<f32>> {
 }
 
 fn init_hashmap() -> HashMap<String, Vec<f32>> {
-    let default = String::from(DEFAULT_DATASET);
     if DEV {
-        preprocessing(default)
+        preprocessing(String::from(DEFAULT_DATASET))
     } else {
         let mut args: Args = std::env::args();
         let dataset = args.nth(1).unwrap();
