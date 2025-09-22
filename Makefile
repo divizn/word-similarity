@@ -12,6 +12,9 @@ down: # Stop Redis container
 logs: # Tail Redis container logs
 	docker compose logs -f  # View Redis logs live
 
+debug: # Runs with RUST_LOG=info for debugging
+	RUST_LOG=info cargo run
+
 redis-cli: # Open interactive Redis CLI
 	docker exec -it redis-embeddings redis-cli  # Connect to Redis CLI inside container
 
