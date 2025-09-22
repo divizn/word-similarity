@@ -1,17 +1,25 @@
 use axum::http::StatusCode;
-use axum::routing::post;
+use axum::routing::{post};
 use axum::{Json, Router};
 use log::{error, info, warn};
+use redis::aio::MultiplexedConnection;
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::fs::File;
 use redis::{AsyncCommands, Client, RedisError};
 use tokio::net::TcpListener;
+use tokio::time::{Duration};
 use std::error::Error;
 use std::sync::{LazyLock};
 
+/// DEV variable for dataseet
 const DEV: bool = true;
-const BATCH_SIZE: usize = 500; // Number of embeddings per pipeline batch for Redis HSET
+/// Number of embeddings per pipeline batch for Redis HSET
+const BATCH_SIZE: usize = 500; 
+/// Max amount of retries before stopping to attempt Redis query/connection
+const REDIS_MAX_RETRY_COUNT: u8 = 5;
+/// Duration to wait between each retry
+const REDIS_RETRY_DELAY_MS: u64 = 2000;
 
 static REDIS_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::open("redis://localhost:6379").expect("Failed to establish redis client")
@@ -136,6 +144,18 @@ async fn similarity_handler(
             StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // TODO: fix this so it works
+    //     let mut conn1 = get_redis_conn_with_retries()
+    //     .await
+    //     .map_err(|e| {
+    //         if e.kind() == redis::ErrorKind::BusyLoadingError {
+    //             error!("Redis could not load after 5 connections in handler, returning status 500");
+    //         } else {
+    //             error!("Unknown Redis error occured in handler attempting to get connection: {e}");     
+    //         }
+    //         StatusCode::INTERNAL_SERVER_ERROR
+    // })?;
+
     let mut conn2 = REDIS_CLIENT
         .get_multiplexed_async_connection()
         .await
@@ -198,9 +218,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     info!("Logger initialised");
 
-    let mut conn = REDIS_CLIENT.get_multiplexed_async_connection().await?;
-
-    let db_ready: bool = conn.exists("GLOVE:OK").await?;
+    let mut conn = get_redis_conn_with_retries().await?;
+    let db_ready: bool = redis_exists_with_retries(&mut conn, "GLOVE:OK").await?;
     if db_ready {
         info!("Embeddings already in Redis, skipping streaming.");
     } else {
@@ -216,16 +235,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let listener = TcpListener::bind("localhost:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();  
-
-    
-    // let mut word1 = Word{val: String::from("dog"), vector: None};
-    // let mut word2 = Word{val: String::from("cat"), vector: None};
-
-    // word1.vector = Some(fetch_embedding(&mut conn, Token{word:word1.val.clone(), embedding:Embedding::Glove}).await?);
-    // word2.vector = Some(fetch_embedding(&mut conn, Token{word:word2.val.clone(), embedding:Embedding::Glove}).await?);
-
-    // let similarity = cosine_similarity(&word1.vector.unwrap(), &word2.vector.expect("vector not found for vector"));
-    // println!("Similarity between '{}' and '{}': {similarity}", word1.val, word2.val);
 
     Ok(())
 }
@@ -353,4 +362,47 @@ async fn init_db(conn: &mut redis::aio::MultiplexedConnection) -> io::Result<()>
     };
 
     load_db(dataset, conn).await
+}
+
+/// Retrieves a connection to Redis,  and has a retry loop that retries `REDIS_RETRY_COUNT` amount of times with a `REDIS_RETRY_DELAY_MS` wait. This does this whenever Redis is still busy loading (if Redis crashes or is initialising still)
+async fn get_redis_conn_with_retries() -> Result<MultiplexedConnection, RedisError> {
+    info!("Attempting to retrieve Redis connection in {REDIS_MAX_RETRY_COUNT} retries");
+    for attempt in 0..=REDIS_MAX_RETRY_COUNT {
+        match REDIS_CLIENT.get_multiplexed_async_connection().await {
+            Ok(c) => return Ok(c),
+            Err(e) if e.kind() == redis::ErrorKind::BusyLoadingError => {
+                warn!("Redis is loading (attempt {}): {e}", attempt + 1);
+                tokio::time::sleep(Duration::from_millis(REDIS_RETRY_DELAY_MS)).await;
+            }
+            Err(e) => {
+                error!("Redis error occured: {e}");
+                return Err(e)
+            },
+        }
+    }
+    Err(RedisError::from((redis::ErrorKind::BusyLoadingError, "Redis still loading")))
+}
+
+/// Checks if key exists in Redis db connection, and has a retry loop that retries `REDIS_MAX_RETRY_COUNT` amount of times with a `REDIS_RETRY_DELAY_MS` wait. This does this whenever Redis is still busy loading (if Redis crashes or is initialising still)
+async fn redis_exists_with_retries(
+    conn: &mut MultiplexedConnection,
+    key: &str,
+) -> Result<bool, RedisError> {
+    for attempt in 0..=REDIS_MAX_RETRY_COUNT {
+        match conn.exists(key).await {
+            Ok(val) => return Ok(val),
+            Err(e) if e.kind() == redis::ErrorKind::BusyLoadingError => {
+                warn!("Redis is still loading (attempt {}): {e}", attempt + 1);
+                tokio::time::sleep(Duration::from_millis(REDIS_RETRY_DELAY_MS)).await;
+            }
+            Err(e) => {
+                error!("Redis error occured: {e}");
+                return Err(e)
+            },        }
+    }
+
+    Err(RedisError::from((
+        redis::ErrorKind::BusyLoadingError,
+        "Redis still loading after retries",
+    )))
 }
