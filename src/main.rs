@@ -1,11 +1,11 @@
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
-use log::info;
-use redis::aio::MultiplexedConnection;
+use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 use tokio::fs::File;
-use redis::{AsyncCommands, Client};
+use redis::{AsyncCommands, Client, RedisError};
 use tokio::net::TcpListener;
 use std::error::Error;
 use std::sync::{LazyLock};
@@ -112,7 +112,7 @@ impl Embedding {
 
 async fn similarity_handler(
     Json(payload): Json<SimilarityRequest>,
-) -> Json<SimilarityResponse> {
+) -> Result<Json<SimilarityResponse>, StatusCode> {
     // Fetch embeddings from Redis
     let token1 = Token {
         word: payload.word1.val.clone(),
@@ -124,22 +124,74 @@ async fn similarity_handler(
         embedding: payload.embedding,
     };
 
-    let mut conn1 = REDIS_CLIENT.get_multiplexed_async_connection().await.expect("could not get multiplexed connection");
-    let mut conn2: MultiplexedConnection = REDIS_CLIENT.get_multiplexed_async_connection().await.expect("could not get multiplexed connection");
+    let mut conn1 = REDIS_CLIENT
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| {
+            if e.is_connection_refusal() {
+                error!("Redis connection refused: {e}");
+            } else {
+                error!("Redis error: {e}");
+            }
+            StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
-    let vec1 = fetch_embedding(&mut conn1, token1).await.unwrap();
-    let vec2 = fetch_embedding(&mut conn2, token2).await.unwrap();
+    let mut conn2 = REDIS_CLIENT
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| {
+            if e.is_connection_refusal() {
+                error!("Redis connection refused: {e}")
+            } else {
+                error!("Redis error: {e}");
+            }
+            StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
+    
+    let vec1 = fetch_embedding(&mut conn1, token1)
+        .await
+        .map_err(|e|{
+            println!("{e}, kind {:?}", e.kind());
+            if e.kind() == redis::ErrorKind::BusyLoadingError {
+                error!("Redis is not loaded yet causing 500 error: {e}")
+            } else {
+                error!("Redis error: {e}");
+            }
+            StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let vec2 = fetch_embedding(&mut conn2, token2)    
+        .await
+        .map_err(|e|{
+            if e.kind() == redis::ErrorKind::BusyLoadingError {
+                warn!("Redis is not loaded yet causing 500 error: {e}")
+            } else {
+                error!("Redis error: {e}");
+            }
+            StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    
     let mut word1 = payload.word1;
     let mut word2 = payload.word2;
     word1.vector = Some(vec1);
     word2.vector = Some(vec2);
 
-    let sim = calculate_similarity(&word1.vector.clone().unwrap(), &word2.vector.clone().unwrap(), payload.measure);
+    let sim = calculate_similarity(
+        word1.vector.as_ref().unwrap(),
+        word2.vector.as_ref().unwrap(),
+        payload.measure
+    );
 
 
-    Json(SimilarityResponse { similarity: sim, words: [word1, word2] })
+    let res = SimilarityResponse { 
+        similarity: sim, 
+        words: [word1, word2] 
+        };
+
+    Ok(Json(res))
 }
+
+
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
