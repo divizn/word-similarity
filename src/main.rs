@@ -1,21 +1,21 @@
 use axum::http::StatusCode;
-use axum::routing::{post};
+use axum::routing::post;
 use axum::{Json, Router};
 use log::{error, info, warn};
 use redis::aio::MultiplexedConnection;
-use serde::{Deserialize, Serialize};
-use tokio::io::{self, AsyncBufReadExt, BufReader};
-use tokio::fs::File;
 use redis::{AsyncCommands, Client, RedisError};
-use tokio::net::TcpListener;
-use tokio::time::{Duration};
+use serde::{Deserialize, Serialize};
 use std::error::Error;
-use std::sync::{LazyLock};
+use std::sync::LazyLock;
+use tokio::fs::File;
+use tokio::io::{self, AsyncBufReadExt, BufReader};
+use tokio::net::TcpListener;
+use tokio::time::Duration;
 
 /// DEV variable for dataseet
 const DEV: bool = true;
 /// Number of embeddings per pipeline batch for Redis HSET
-const BATCH_SIZE: usize = 500; 
+const BATCH_SIZE: usize = 500;
 /// Max amount of retries before stopping to attempt Redis query/connection
 const REDIS_MAX_RETRY_COUNT: u8 = 5;
 /// Duration to wait between each retry
@@ -25,29 +25,24 @@ static REDIS_CLIENT: LazyLock<Client> = LazyLock::new(|| {
     Client::open("redis://localhost:6379").expect("Failed to establish redis client")
 });
 
-
 /// Represents the input word. Wraps the input word with Embedding  so it can be retreived from Redis.
 struct Token {
-    word: String, // e.g. king
+    word: String,         // e.g. king
     embedding: Embedding, // e.g. see Embedding
 }
 
 /// Represents a word, stores word value and the vector representation - different from Token which is used for loading words into database
 #[derive(Serialize, Deserialize)]
 struct Word {
-    val: String, // word value e.g. king
-    vector: Option<Vec<f32>> // vector representation
-
+    val: String,              // word value e.g. king
+    vector: Option<Vec<f32>>, // vector representation
 }
 
 /// Represents the dataset, and wraps with Embedding so can provide context to Redis.
 struct Dataset {
-    dir: String, // e.g. embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt
-    embedding: Embedding // see Embedding
-
-
+    dir: String,          // e.g. embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt
+    embedding: Embedding, // see Embedding
 }
-
 
 /// ### API Request body
 /// - `word1` - First word to compare
@@ -62,7 +57,7 @@ struct SimilarityRequest {
     embedding: Embedding, // "Glove" or "Word2vec   "
 
     #[serde(default = "default_measure")]
-    measure: Measure
+    measure: Measure,
 }
 
 /// Returns the default `Embedding`
@@ -88,7 +83,7 @@ struct SimilarityResponse {
 #[derive(Serialize, Deserialize)]
 enum Measure {
     Cosine,
-    Dot
+    Dot,
 }
 
 /// The different types of embeddings stored in Redis.
@@ -142,7 +137,7 @@ async fn similarity_handler(
                 error!("Redis error: {e}");
             }
             StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+        })?;
 
     // TODO: fix this so it works
     //     let mut conn1 = get_redis_conn_with_retries()
@@ -151,7 +146,7 @@ async fn similarity_handler(
     //         if e.kind() == redis::ErrorKind::BusyLoadingError {
     //             error!("Redis could not load after 5 connections in handler, returning status 500");
     //         } else {
-    //             error!("Unknown Redis error occured in handler attempting to get connection: {e}");     
+    //             error!("Unknown Redis error occured in handler attempting to get connection: {e}");
     //         }
     //         StatusCode::INTERNAL_SERVER_ERROR
     // })?;
@@ -166,31 +161,26 @@ async fn similarity_handler(
                 error!("Redis error: {e}");
             }
             StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let vec1 = fetch_embedding(&mut conn1, token1).await.map_err(|e| {
+        println!("{e}, kind {:?}", e.kind());
+        if e.kind() == redis::ErrorKind::BusyLoadingError {
+            error!("Redis is not loaded yet causing 500 error: {e}");
+        } else {
+            error!("Redis error: {e}");
+        }
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let vec2 = fetch_embedding(&mut conn2, token2).await.map_err(|e| {
+        if e.kind() == redis::ErrorKind::BusyLoadingError {
+            warn!("Redis is not loaded yet causing 500 error: {e}");
+        } else {
+            error!("Redis error: {e}");
+        }
+        StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    
-    let vec1 = fetch_embedding(&mut conn1, token1)
-        .await
-        .map_err(|e|{
-            println!("{e}, kind {:?}", e.kind());
-            if e.kind() == redis::ErrorKind::BusyLoadingError {
-                error!("Redis is not loaded yet causing 500 error: {e}");
-            } else {
-                error!("Redis error: {e}");
-            }
-            StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let vec2 = fetch_embedding(&mut conn2, token2)    
-        .await
-        .map_err(|e|{
-            if e.kind() == redis::ErrorKind::BusyLoadingError {
-                warn!("Redis is not loaded yet causing 500 error: {e}");
-            } else {
-                error!("Redis error: {e}");
-            }
-            StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    
     let mut word1 = payload.word1;
     let mut word2 = payload.word2;
     word1.vector = Some(vec1);
@@ -199,19 +189,16 @@ async fn similarity_handler(
     let sim = calculate_similarity(
         word1.vector.as_ref().unwrap(),
         word2.vector.as_ref().unwrap(),
-        &payload.measure
+        &payload.measure,
     );
 
-
-    let res = SimilarityResponse { 
-        similarity: sim, 
-        words: [word1, word2] 
-        };
+    let res = SimilarityResponse {
+        similarity: sim,
+        words: [word1, word2],
+    };
 
     Ok(Json(res))
 }
-
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -228,13 +215,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         info!("Finished streaming embeddings.");
     }
 
-
     println!("Server starting at :3000");
-    
+
     let app: axum::Router = Router::new().route("/similarity", post(similarity_handler));
 
     let listener = TcpListener::bind("localhost:3000").await.unwrap();
-    axum::serve(listener, app).await.unwrap();  
+    axum::serve(listener, app).await.unwrap();
 
     Ok(())
 }
@@ -258,7 +244,6 @@ fn dot_product(vec1: &[f32], vec2: &[f32]) -> f32 {
     vec1.iter().zip(vec2).map(|(a, b)| a * b).sum()
 }
 
-
 /// Calculates the cosine simuilarity between 2 vectors `vec1` and `vec2`.
 fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> f32 {
     let dot = dot_product(vec1, vec2);
@@ -267,20 +252,15 @@ fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> f32 {
     dot / (norm1 * norm2)
 }
 
-
 fn calculate_similarity(vec1: &[f32], vec2: &[f32], measure: &Measure) -> f32 {
     match measure {
         Measure::Cosine => cosine_similarity(vec1, vec2),
-        Measure::Dot => dot_product(vec1, vec2)
+        Measure::Dot => dot_product(vec1, vec2),
     }
 }
 
-
 /// Sets up Redis to store vectors provided by the `Dataset`. The key is represented like `Embedding:word` where `dataset.Embedding` is the embedding, and word is the word from the dataset.
-async fn load_db(
-    dataset: Dataset,
-    conn: &mut redis::aio::MultiplexedConnection,
-) -> io::Result<()> {
+async fn load_db(dataset: Dataset, conn: &mut redis::aio::MultiplexedConnection) -> io::Result<()> {
     let file = File::open(&dataset.dir).await?;
     info!("opened file {}", &dataset.dir);
     let reader = BufReader::new(file);
@@ -303,16 +283,14 @@ async fn load_db(
             info!("created redis key for {word}: {redis_key}");
 
             info!("piping HSETs");
-            pipe.cmd("HSET")
-                .arg(&redis_key)
-                .arg(
-                    embedding
-                        .iter()
-                        .enumerate()
-                        .flat_map(|(i, val)| vec![i.to_string(), val.to_string()])
-                        .collect::<Vec<String>>(),
-                );
-            
+            pipe.cmd("HSET").arg(&redis_key).arg(
+                embedding
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(i, val)| vec![i.to_string(), val.to_string()])
+                    .collect::<Vec<String>>(),
+            );
+
             batch_count += 1;
             total_count += 1;
             info!("current batch size: {batch_count}");
@@ -332,7 +310,7 @@ async fn load_db(
         let _: () = pipe.query_async(conn).await.unwrap();
         info!("Added final {batch_count} embeddings to Redis (total {total_count})");
     }
-    
+
     let ok_key = format!("{}:OK", dataset.embedding.as_str());
     let _: () = redis::cmd("SET")
         .arg(&ok_key)
@@ -349,15 +327,20 @@ async fn load_db(
 /// Retrieves dataset from stdin, else fallbacks to default directory (glove.twitter.27B).
 async fn init_db(conn: &mut redis::aio::MultiplexedConnection) -> io::Result<()> {
     let dataset = if DEV {
-        Dataset{
+        Dataset {
             dir: String::from("embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt"),
-            embedding: Embedding::from_path("embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt").expect("Unknown embedding type")
+            embedding: Embedding::from_path(
+                "embeddings/glove.twitter.27B/glove.twitter.27B.200d.txt",
+            )
+            .expect("Unknown embedding type"),
         }
     } else {
-        let arg = std::env::args().nth(1).expect("No dataset argument provided");
-        Dataset{
+        let arg = std::env::args()
+            .nth(1)
+            .expect("No dataset argument provided");
+        Dataset {
             dir: String::from(&arg),
-            embedding: Embedding::from_path(arg.as_str()).expect("Unknown embedding type")
+            embedding: Embedding::from_path(arg.as_str()).expect("Unknown embedding type"),
         }
     };
 
@@ -376,11 +359,14 @@ async fn get_redis_conn_with_retries() -> Result<MultiplexedConnection, RedisErr
             }
             Err(e) => {
                 error!("Redis error occured: {e}");
-                return Err(e)
-            },
+                return Err(e);
+            }
         }
     }
-    Err(RedisError::from((redis::ErrorKind::BusyLoadingError, "Redis still loading")))
+    Err(RedisError::from((
+        redis::ErrorKind::BusyLoadingError,
+        "Redis still loading",
+    )))
 }
 
 /// Checks if key exists in Redis db connection, and has a retry loop that retries `REDIS_MAX_RETRY_COUNT` amount of times with a `REDIS_RETRY_DELAY_MS` wait. This does this whenever Redis is still busy loading (if Redis crashes or is initialising still)
@@ -397,8 +383,9 @@ async fn redis_exists_with_retries(
             }
             Err(e) => {
                 error!("Redis error occured: {e}");
-                return Err(e)
-            },        }
+                return Err(e);
+            }
+        }
     }
 
     Err(RedisError::from((
