@@ -161,7 +161,7 @@ async fn similarity_handler(
         .await
         .map_err(|e| {
             if e.is_connection_refusal() {
-                error!("Redis connection refused: {e}")
+                error!("Redis connection refused: {e}");
             } else {
                 error!("Redis error: {e}");
             }
@@ -174,7 +174,7 @@ async fn similarity_handler(
         .map_err(|e|{
             println!("{e}, kind {:?}", e.kind());
             if e.kind() == redis::ErrorKind::BusyLoadingError {
-                error!("Redis is not loaded yet causing 500 error: {e}")
+                error!("Redis is not loaded yet causing 500 error: {e}");
             } else {
                 error!("Redis error: {e}");
             }
@@ -184,7 +184,7 @@ async fn similarity_handler(
         .await
         .map_err(|e|{
             if e.kind() == redis::ErrorKind::BusyLoadingError {
-                warn!("Redis is not loaded yet causing 500 error: {e}")
+                warn!("Redis is not loaded yet causing 500 error: {e}");
             } else {
                 error!("Redis error: {e}");
             }
@@ -199,7 +199,7 @@ async fn similarity_handler(
     let sim = calculate_similarity(
         word1.vector.as_ref().unwrap(),
         word2.vector.as_ref().unwrap(),
-        payload.measure
+        &payload.measure
     );
 
 
@@ -268,7 +268,7 @@ fn cosine_similarity(vec1: &[f32], vec2: &[f32]) -> f32 {
 }
 
 
-fn calculate_similarity(vec1: &[f32], vec2: &[f32], measure: Measure) -> f32 {
+fn calculate_similarity(vec1: &[f32], vec2: &[f32], measure: &Measure) -> f32 {
     match measure {
         Measure::Cosine => cosine_similarity(vec1, vec2),
         Measure::Dot => dot_product(vec1, vec2)
